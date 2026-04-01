@@ -1,0 +1,32 @@
+# Ignore datasets
+database/
+input/datasets/
+
+# Ignore output files
+output/
+
+# Ignore audio
+*.wav
+*.amr
+*.mpeg
+
+# Ignore database
+*.db
+
+# Ignore docs
+*.ppt
+*.pptx
+*.doc
+*.docx
+*.pdf
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment
+.env
+venv/
+
+# IDE
+.vscode/
