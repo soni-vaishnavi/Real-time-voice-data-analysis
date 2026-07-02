@@ -64,7 +64,7 @@ def run_phase3(
     """
     Full Phase 3 dual-channel analysis pipeline.
 
-    Reads:  all_transcripts_final.json
+    Reads:  all_transcripts.json or all_transcripts_final.json
     Writes: all_analysis.json (each chunk has emotion_analysis{} + emergency_analysis{})
 
     Does NOT compute score{} — that is Phase 4's job.
@@ -86,9 +86,11 @@ def run_phase3(
         transcripts = json.load(f)
     logger.info(f"Loaded {len(transcripts)} transcripts")
 
-    os.makedirs(output_dir, exist_ok=True)
+    if any("keyword_analysis" not in t for t in transcripts):
+        logger.info("Transcript metadata missing keyword_analysis; applying Phase 2 keyword normalization fallback")
+        from pipeline.phase2_stt.keyword_normalizer import apply_keyword_normalization_all
+        transcripts = apply_keyword_normalization_all(transcripts)
 
-    # Determine if audio emotion channel is available
     audio_mode = bool(chunks_dir and os.path.exists(chunks_dir))
     logger.info(f"Audio emotion: {'ENABLED (wav2vec2)' if audio_mode else 'DISABLED (text-only)'}")
 
@@ -168,9 +170,9 @@ def run_phase3(
             kw_boost = t.get("keyword_analysis", {}).get("total_boost", 0.0)
             kw_cat   = t.get("keyword_analysis", {}).get("top_category", None)
 
-            if kw_boost > 0 and kw_cat and kw_cat in emergency.get("all_scores", {}):
-                boosted = min(emergency["all_scores"][kw_cat] + kw_boost, 1.0)
-                emergency["all_scores"][kw_cat] = round(boosted, 4)
+            if kw_boost > 0 and kw_cat and kw_cat.lower() in emergency.get("all_scores", {}):
+                boosted = min(emergency["all_scores"][kw_cat.lower()] + kw_boost, 1.0)
+                emergency["all_scores"][kw_cat.lower()] = round(boosted, 4)
                 new_top = max(emergency["all_scores"], key=emergency["all_scores"].get)
                 emergency["top_category"] = new_top
                 emergency["top_score"]    = emergency["all_scores"][new_top]

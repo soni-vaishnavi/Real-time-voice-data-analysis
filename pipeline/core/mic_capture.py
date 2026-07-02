@@ -105,6 +105,32 @@ class MicCapture(threading.Thread):
 
         session_start_sec = 0.0
 
+        # Ensure we have a valid input device before recording.
+        try:
+            if self.device is not None:
+                dev_info = sd.query_devices(self.device, kind="input")
+            else:
+                dev_info = sd.query_devices(kind="input")
+            logger.info(
+                f"Mic device selected: {dev_info['name']} "
+                f"(input_channels={dev_info['max_input_channels']})"
+            )
+            if dev_info.get("max_input_channels", 0) < 1:
+                raise ValueError("Selected device has no input channels")
+        except Exception as e:
+            logger.warning(f"Input device validation failed: {e}")
+            for idx, device_info in enumerate(sd.query_devices()):
+                if device_info.get("max_input_channels", 0) > 0:
+                    self.device = idx
+                    logger.info(
+                        f"MicCapture fallback to input device {idx}: {device_info['name']} "
+                        f"(input_channels={device_info['max_input_channels']})"
+                    )
+                    break
+            else:
+                logger.error("No valid microphone input device found. Please check your mic and sounddevice configuration.")
+                return
+
         while not self._stop_event.is_set():
             try:
                 # Record exactly chunk_sec seconds — blocking call
@@ -118,6 +144,14 @@ class MicCapture(threading.Thread):
                 )
                 # audio shape: (samples, 1) — flatten to (samples,)
                 audio_flat = audio.flatten()
+
+                # Check audio level to detect mic issues
+                audio_level = np.sqrt(np.mean(audio_flat.astype(np.float64) ** 2))
+                if audio_level < 500:
+                    logger.warning(
+                        f"Low audio level detected (RMS={audio_level:.0f}). "
+                        f"Check microphone gain/volume or speak louder."
+                    )
 
                 chunk_path = self._save_wav(audio_flat)
                 item = {

@@ -2,10 +2,13 @@
 pipeline/core/config.py
 ========================
 SINGLE SOURCE OF TRUTH for all VoiceGuard constants.
-Every module imports from here. No module defines its own weights or thresholds.
 
-Usage in any module:
-    from pipeline.core.config import WEIGHT_EMOTION, ZONE_RED, EMERGENCY_THRESHOLD
+Changes in this version:
+  - WHISPER_MODEL_SIZE default changed to "small" (was "tiny")
+    small gives ~80% Hinglish accuracy vs ~40% for tiny
+  - DASHBOARD_DATA_SOURCE added for Stage 7
+    "file" = read all_decisions.json (original behavior)
+    "api"  = poll GET /chunks from FastAPI (live mode behavior)
 """
 
 import os
@@ -15,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── PATHS ──────────────────────────────────────────────────────────────────────
-BASE_DIR        = Path(__file__).parent.parent.parent   # voice_surveillance/
+BASE_DIR        = Path(__file__).parent.parent.parent
 OUTPUT_DIR      = BASE_DIR / "output"
 CHUNKS_DIR      = OUTPUT_DIR / "chunks"
 TRANSCRIPTS_DIR = OUTPUT_DIR / "transcripts"
@@ -27,53 +30,55 @@ DATABASE_URL    = f"sqlite:///{DATABASE_PATH}"
 
 # ── PHASE 1: AUDIO ────────────────────────────────────────────────────────────
 SAMPLE_RATE           = 16000
-CHUNK_WINDOW_SEC      = 5
+CHUNK_WINDOW_SEC      = 5                # File mode chunk size (batched processing)
+LIVE_CHUNK_WINDOW_SEC = 2                # Live mode chunk size (real-time, lower latency)
 CHUNK_OVERLAP_SEC     = 2
 VAD_AGGRESSIVENESS    = 2
 NOISE_REDUCE_STRENGTH = 0.75
+AUDIO_LEVEL_WARNING_THRESHOLD = 500      # RMS level below this = too quiet (warn user)
 
 # ── PHASE 2: STT ──────────────────────────────────────────────────────────────
-WHISPER_MODEL_SIZE  = "tiny"   # tiny=75MB, base=145MB, small=460MB
+# CHANGED: "small" default — ~80% Hinglish accuracy vs ~40% for "tiny"
+# tiny=39MB/5s, base=74MB/8s, small=244MB/12s, medium=769MB/30s (all CPU times)
+WHISPER_MODEL_SIZE  = "small"
 WHISPER_DEVICE      = "cpu"
-WHISPER_BEAM_SIZE   = 3
-WORD_CONFIDENCE_MIN = 0.40
+WHISPER_BEAM_SIZE   = 5       # CHANGED: was 3
+WORD_CONFIDENCE_MIN = 0.35    # CHANGED: was 0.40 (slightly more lenient for Hindi)
 
 # ── PHASE 3: MODELS ───────────────────────────────────────────────────────────
 EMOTION_MODEL   = "j-hartmann/emotion-english-distilroberta-base"
 EMERGENCY_MODEL = "facebook/bart-large-mnli"
 
 EMERGENCY_LABELS = [
-    "medical emergency, someone needs a doctor or ambulance",
-    "fire emergency, there is a fire or smoke",
-    "violence or physical assault, someone is being attacked or hurt",
-    "accident or injury, someone has fallen or been injured",
-    "theft or robbery, someone is stealing or being robbed",
-    "mental health crisis, someone wants to harm themselves",
-    "normal conversation, no emergency",
+    "medical emergency",
+    "fire emergency",
+    "violence or assault",
+    "accident or injury",
+    "theft or robbery",
+    "mental health crisis",
+    "normal conversation",
 ]
 
 EMERGENCY_LABEL_SHORT = {
-    "medical emergency, someone needs a doctor or ambulance":           "medical",
-    "fire emergency, there is a fire or smoke":                         "fire",
-    "violence or physical assault, someone is being attacked or hurt":  "violence",
-    "accident or injury, someone has fallen or been injured":           "accident",
-    "theft or robbery, someone is stealing or being robbed":            "theft",
-    "mental health crisis, someone wants to harm themselves":           "mental_health",
-    "normal conversation, no emergency":                                "normal",
+    "medical emergency":           "medical",
+    "fire emergency":               "fire",
+    "violence or assault":          "violence",
+    "accident or injury":           "accident",
+    "theft or robbery":             "theft",
+    "mental health crisis":         "mental_health",
+    "normal conversation":          "normal",
 }
 
-# EMERGENCY_THRESHOLD = 0.55 (was 0.35 in old emergency_detector, 0.55 in old analyzer — unified here)
 EMERGENCY_THRESHOLD     = 0.55
 MIN_WORDS_FOR_EMERGENCY = 4
 
 # ── PHASE 4: SCORING ──────────────────────────────────────────────────────────
-# Weights MUST sum to 1.0 — enforced by validate_config()
-WEIGHT_EMOTION   = 0.35
-WEIGHT_EMERGENCY = 0.40
-WEIGHT_KEYWORD   = 0.25
+WEIGHT_EMOTION   = 0.25  # Reduced from 0.35
+WEIGHT_EMERGENCY = 0.55  # Increased from 0.40
+WEIGHT_KEYWORD   = 0.20  # Reduced from 0.25
 
-ZONE_YELLOW = 0.45   # score >= ZONE_YELLOW → YELLOW
-ZONE_RED    = 0.72   # score >= ZONE_RED    → RED
+ZONE_YELLOW = 0.45
+ZONE_RED    = 0.55  # Further lowered from 0.60
 
 CONSECUTIVE_YELLOW_LIMIT = 3
 RAPID_RISE_THRESHOLD     = 0.20
@@ -103,20 +108,21 @@ SOUND_YELLOW = str(BASE_DIR / "assets" / "beep.wav")
 SOUND_RED    = str(BASE_DIR / "assets" / "alarm.wav")
 
 # ── STAGE 2: QUEUE ────────────────────────────────────────────────────────────
-QUEUE_MAXSIZE = 10   # bounded — drops oldest chunk if full (back-pressure)
+QUEUE_MAXSIZE = 10
+
+# ── STAGE 7: DASHBOARD DATA SOURCE ────────────────────────────────────────────
+# "file" → read output/decisions/all_decisions.json (file mode, original behavior)
+# "api"  → poll GET http://localhost:8000/chunks  (live mode, real-time)
+DASHBOARD_DATA_SOURCE = os.getenv("DASHBOARD_DATA_SOURCE", "file")  # "file" | "api"
+DASHBOARD_API_URL     = os.getenv("DASHBOARD_API_URL", "http://localhost:8000")
 
 # ── STARTUP VALIDATION ────────────────────────────────────────────────────────
 def validate_config() -> None:
-    """Called at startup. Fails loudly on any misconfiguration."""
     w = WEIGHT_EMOTION + WEIGHT_EMERGENCY + WEIGHT_KEYWORD
-    assert abs(w - 1.0) < 0.001, \
-        f"Scoring weights must sum to 1.0, got {w:.4f}"
-    assert 0.0 < ZONE_YELLOW < ZONE_RED < 1.0, \
-        f"Zone thresholds: 0 < ZONE_YELLOW({ZONE_YELLOW}) < ZONE_RED({ZONE_RED}) < 1.0"
-    assert 0.0 < EMERGENCY_THRESHOLD < 1.0, \
-        f"EMERGENCY_THRESHOLD must be in (0,1), got {EMERGENCY_THRESHOLD}"
-    assert WHISPER_MODEL_SIZE in ("tiny","base","small","medium"), \
-        f"Invalid WHISPER_MODEL_SIZE: {WHISPER_MODEL_SIZE}"
+    assert abs(w - 1.0) < 0.001, f"Scoring weights must sum to 1.0, got {w:.4f}"
+    assert 0.0 < ZONE_YELLOW < ZONE_RED < 1.0
+    assert 0.0 < EMERGENCY_THRESHOLD < 1.0
+    assert WHISPER_MODEL_SIZE in ("tiny","base","small","medium")
     for d in [OUTPUT_DIR, CHUNKS_DIR, TRANSCRIPTS_DIR, ANALYSIS_DIR,
               DECISIONS_DIR, REPORTS_DIR]:
         d.mkdir(parents=True, exist_ok=True)

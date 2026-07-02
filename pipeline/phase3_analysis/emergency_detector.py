@@ -144,9 +144,9 @@ def analyze_emergency_batch(transcripts: List[Dict]) -> List[Dict]:
         kw_boost  = t.get("keyword_analysis", {}).get("total_boost", 0.0)
         kw_cat    = t.get("keyword_analysis", {}).get("top_category", None)
 
-        if kw_boost > 0 and kw_cat and kw_cat in emergency.get("all_scores", {}):
-            boosted = min(emergency["all_scores"][kw_cat] + kw_boost, 1.0)
-            emergency["all_scores"][kw_cat] = round(boosted, 4)
+        if kw_boost > 0 and kw_cat and kw_cat.lower() in emergency.get("all_scores", {}):
+            boosted = min(emergency["all_scores"][kw_cat.lower()] + kw_boost, 1.0)
+            emergency["all_scores"][kw_cat.lower()] = round(boosted, 4)
             new_top = max(emergency["all_scores"], key=emergency["all_scores"].get)
             emergency.update({
                 "top_category": new_top,

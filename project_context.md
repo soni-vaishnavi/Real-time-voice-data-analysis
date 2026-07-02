@@ -776,3 +776,4 @@ If BART inference fails on chunk N, the exception is caught and the chunk gets a
 
 *This document was generated from full codebase analysis. Last updated: 2026-04-01.*
 *Assumptions are marked inline. Section 7 (Database) and Section 6 (API) contain design inferences where implementation is absent.*
+

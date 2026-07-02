@@ -48,3 +48,5 @@ sounddevice
 
 
 sqlalchemy
+
+#streamlit run pipeline/phase5_alerts/dashboard.py

@@ -1,24 +1,30 @@
 """
 main.py
 ========
-VoiceGuard — Unified Entry Point (Stage 0 through 5)
+VoiceGuard — Unified Entry Point (Stage 0 → 7)
 
 Two modes:
   --mode file  (default) Phases 1-6 on a pre-recorded audio file
   --mode live  Live mic → FastAPI → queue → worker → DB → alerts → dashboard
 
-Bug fixes in this version:
-  - transcripts_path now correctly uses all_transcripts.json (not _final.json)
-    Keyword normalization moved inside Phase 3 analyzer — no separate step needed
-  - wav2vec2 LOAD REPORT warnings suppressed via transformers.logging
+Accuracy fixes in this version:
+  - File mode: uses Whisper "small" model by default (--model tiny to override)
+  - File mode: transcripts_path fixed to all_transcripts.json (not _final.json)
+  - Live mode: worker normalizes mic audio before Whisper
+  - Both modes: wav2vec2 LOAD REPORT warnings suppressed
+
+Stage 7 in this version:
+  - Live mode: sets DASHBOARD_DATA_SOURCE=api so dashboard reads from FastAPI
+  - File mode: sets DASHBOARD_DATA_SOURCE=file (original JSON behavior)
 
 Usage:
     python main.py                             # file mode, default audio
     python main.py input/audio/my.wav          # file mode, custom audio
+    python main.py --model tiny                # file mode, fast tiny model
     python main.py --mode live                 # live mic + API + dashboard
     python main.py --mode live --no-dashboard  # live mic + API only
-    python main.py --skip-phase1 --skip-phase2 # reuse existing output
     python main.py --mode live --mic-device 1  # specific mic device
+    python main.py --skip-phase1 --skip-phase2 # reuse existing output
 """
 
 import os
@@ -31,24 +37,34 @@ import argparse
 import threading
 import subprocess
 
-logging.basicConfig(
-    level    = logging.INFO,
-    format   = "%(asctime)s [%(levelname)s] %(message)s",
-    handlers = [
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("output/pipeline.log", mode="a", encoding="utf-8"),
-    ],
-)
+os.makedirs("output", exist_ok=True)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+# Remove any pre-existing handlers and set new console + debug file handlers
+for handler in list(root_logger.handlers):
+    root_logger.removeHandler(handler)
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(formatter)
+root_logger.addHandler(stream_handler)
+
+debug_handler = logging.FileHandler("output/debug.log", mode="a", encoding="utf-8")
+debug_handler.setLevel(logging.DEBUG)
+debug_handler.setFormatter(formatter)
+root_logger.addHandler(debug_handler)
+
 logger = logging.getLogger("main")
 
-DEFAULT_AUDIO  = "input/audio/Test_Normal.wav"
+DEFAULT_AUDIO  = "input/audio/emergency_scenario.wav"
 API_URL        = "http://localhost:8000"
 API_PORT       = 8000
 DASHBOARD_PORT = 8501
 
 
 # ── Suppress noisy HuggingFace model weight warnings ─────────────────────────
-# wav2vec2 LOAD REPORT and RoBERTa position_ids are cosmetic — models work fine
 def _suppress_hf_warnings():
     try:
         import transformers
@@ -61,7 +77,7 @@ def _suppress_hf_warnings():
 #  FILE MODE — Phases 1-6
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
+def run_file_mode(audio_path: str, model_size: str, skip: dict, dashboard: bool = False) -> None:
 
     def _step(msg):  print(f"\n  ▶  {msg}")
     def _ok(msg, t=None): print(f"  ✅ {msg}" + (f" ({t:.1f}s)" if t else ""))
@@ -72,6 +88,9 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
     print("═" * 60)
 
     _suppress_hf_warnings()
+
+    # Stage 7: file mode uses JSON file data source
+    os.environ["DASHBOARD_DATA_SOURCE"] = "file"
 
     from pipeline.core.config import (
         validate_config, CHUNKS_DIR, TRANSCRIPTS_DIR, ANALYSIS_DIR, DECISIONS_DIR,
@@ -111,7 +130,6 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
 
     # ── Phase 2 ────────────────────────────────────────────────────────────────
     # FIX: use all_transcripts.json (whisper_transcriber saves here)
-    # Keyword normalization now happens INSIDE Phase 3 analyzer.py
     transcripts_path = str(TRANSCRIPTS_DIR / "all_transcripts.json")
 
     if not skip.get("phase2"):
@@ -121,7 +139,7 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
         transcripts = transcribe_all_chunks(
             metadata_path = meta_path,
             output_dir    = str(TRANSCRIPTS_DIR),
-            model_size    = model_size,
+            model_size    = model_size,   # "small" by default now
         )
         _ok(f"Phase 2 — {len(transcripts)} transcripts", time.time() - t0)
     else:
@@ -144,15 +162,12 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
     t0 = time.time()
     with open(analysis_path, encoding="utf-8") as f:
         analysis = json.load(f)
-
     from pipeline.phase4_decision.scorer          import score_all_chunks
     from pipeline.phase4_decision.zone_classifier import classify_all_zones
     from pipeline.phase4_decision.trend_analyzer  import apply_trend_analysis
     final = apply_trend_analysis(classify_all_zones(score_all_chunks(analysis)))
-
     with open(decisions_path, "w", encoding="utf-8") as f:
         json.dump(final, f, indent=2, ensure_ascii=False)
-
     zones = [c.get("score", {}).get("zone", "GREEN") for c in final]
     red   = zones.count("RED")
     _ok(f"Phase 4 — 🟢{zones.count('GREEN')} 🟡{zones.count('YELLOW')} 🔴{red}",
@@ -171,7 +186,7 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
                 recent = final[max(0, idx - 4):idx + 1]
                 send_emergency_sms(chunk)
                 send_emergency_email(chunk, recent)
-                print(f"    🚨 Alert fired: {s.get('incident_id','?')}")
+                print(f"    🚨 Alert: {s.get('incident_id','?')}")
     else:
         _ok("Phase 5 — No RED incidents")
 
@@ -185,8 +200,24 @@ def run_file_mode(audio_path: str, model_size: str, skip: dict) -> None:
     print("\n" + "═" * 60)
     print("  FILE MODE COMPLETE ✅")
     print(f"  Total: {time.time() - t_total:.1f}s")
-    print(f"  Dashboard: streamlit run pipeline/phase5_alerts/dashboard.py")
-    print("═" * 60)
+    print(f"\n  To view dashboard (file mode, reads all_decisions.json):")
+    print(f"  streamlit run pipeline/phase5_alerts/dashboard.py")
+    if dashboard:
+        print("\n  Launching dashboard...")
+        dash = subprocess.Popen(
+            [sys.executable, "-m", "streamlit", "run",
+             "pipeline/phase5_alerts/dashboard.py",
+             "--server.port", str(DASHBOARD_PORT),
+             "--server.headless", "true"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=os.environ,
+        )
+        time.sleep(2)
+        if dash.poll() is None:
+            print(f"  ✅ Dashboard started — http://localhost:{DASHBOARD_PORT}")
+        else:
+            print("  ❌ Failed to start dashboard. Run the Streamlit command manually.")
+        print("═" * 60)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -197,14 +228,19 @@ def run_live_mode(no_dashboard: bool = False, mic_device: int = None) -> None:
 
     _suppress_hf_warnings()
 
+    # Stage 7: live mode uses API data source
+    os.environ["DASHBOARD_DATA_SOURCE"] = "api"
+    os.environ["DASHBOARD_API_URL"]     = API_URL
+
     print("\n" + "═" * 60)
-    print("  VOICEGUARD — LIVE MODE (Stage 4+5)")
+    print("  VOICEGUARD — LIVE MODE (Stage 6+7)")
     print(f"  API:       http://localhost:{API_PORT}/docs")
     print(f"  Chunks:    http://localhost:{API_PORT}/chunks")
     print(f"  Alerts:    http://localhost:{API_PORT}/alerts")
+    print(f"  Health:    http://localhost:{API_PORT}/health")
     print(f"  DB:        database/voiceguard.db")
     if not no_dashboard:
-        print(f"  Dashboard: http://localhost:{DASHBOARD_PORT}")
+        print(f"  Dashboard: http://localhost:{DASHBOARD_PORT}  [reads from API]")
     print("  Press Ctrl+C to stop")
     print("═" * 60 + "\n")
 
@@ -219,27 +255,27 @@ def run_live_mode(no_dashboard: bool = False, mic_device: int = None) -> None:
             mic.stop()
             mic.join(timeout=5)
         for p in processes:
-            try:
-                p.terminate()
-            except Exception:
-                pass
+            try: p.terminate()
+            except Exception: pass
         print("  Stopped ✅")
 
     signal.signal(signal.SIGINT,  shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
     # ── Start FastAPI ──────────────────────────────────────────────────────────
-    print("  Starting FastAPI (DB init + worker + BART background load)...")
+    print("  Starting FastAPI...")
+    env_live = {**os.environ, "DASHBOARD_DATA_SOURCE": "api"}
     api_proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "api.main:app",
          "--host", "0.0.0.0", "--port", str(API_PORT), "--log-level", "warning"],
         cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=env_live,
     )
     processes.append(api_proc)
-    time.sleep(3)   # wait for FastAPI + DB init
+    time.sleep(3)
 
     if api_proc.poll() is not None:
-        print("  ❌ FastAPI failed to start")
+        print("  ❌ FastAPI failed to start. Check logs.")
         return
     print(f"  ✅ FastAPI ready — http://localhost:{API_PORT}/docs")
 
@@ -251,17 +287,19 @@ def run_live_mode(no_dashboard: bool = False, mic_device: int = None) -> None:
              "--server.port", str(DASHBOARD_PORT),
              "--server.headless", "true"],
             cwd=os.path.dirname(os.path.abspath(__file__)),
+            env={**env_live},
         )
         processes.append(dash)
         time.sleep(2)
         if dash.poll() is None:
-            print(f"  ✅ Dashboard — http://localhost:{DASHBOARD_PORT}")
+            print(f"  ✅ Dashboard — http://localhost:{DASHBOARD_PORT}  (reads live from API)")
 
     # ── Start mic capture ──────────────────────────────────────────────────────
-    print("\n  Starting mic capture — speak into your microphone...\n")
+    print("\n  Starting mic capture...\n")
 
     import requests as req_lib
     from pipeline.core.mic_capture import MicCapture
+    from pipeline.core.config import LIVE_CHUNK_WINDOW_SEC
 
     session_id = [time.strftime("session_%Y%m%d_%H%M%S")]
 
@@ -270,13 +308,13 @@ def run_live_mode(no_dashboard: bool = False, mic_device: int = None) -> None:
             with open(item["audio_path"], "rb") as f:
                 resp = req_lib.post(
                     f"{API_URL}/audio/submit",
-                    files={"file": (os.path.basename(item["audio_path"]), f, "audio/wav")},
-                    data={
+                    files = {"file": (os.path.basename(item["audio_path"]), f, "audio/wav")},
+                    data  = {
                         "session_id":  session_id[0],
                         "chunk_index": str(item["chunk_index"]),
                         "chunk_start": str(item["chunk_start"]),
                     },
-                    timeout=5,
+                    timeout = 5,
                 )
             data   = resp.json()
             status = data.get("status", "?")
@@ -285,12 +323,13 @@ def run_live_mode(no_dashboard: bool = False, mic_device: int = None) -> None:
         except Exception as e:
             logger.warning(f"Submit failed {item.get('chunk_id','?')}: {e}")
 
-    mic = MicCapture(on_chunk=send_to_api, device=mic_device)
+    mic = MicCapture(on_chunk=send_to_api, device=mic_device, chunk_sec=LIVE_CHUNK_WINDOW_SEC)
     mic.start()
 
     print("  System running.")
     print(f"  Live results: http://localhost:{API_PORT}/chunks")
-    print(f"  Active alerts: http://localhost:{API_PORT}/alerts\n")
+    print(f"  Active alerts: http://localhost:{API_PORT}/alerts")
+    print(f"  Health:        http://localhost:{API_PORT}/health\n")
 
     while not stop_event.is_set():
         time.sleep(1)
@@ -306,26 +345,30 @@ def main():
     os.makedirs("output", exist_ok=True)
 
     parser = argparse.ArgumentParser(
-        description     = "VoiceGuard — Real-Time Voice Emergency Detection",
+        description = "VoiceGuard — Real-Time Voice Emergency Detection",
         formatter_class = argparse.RawDescriptionHelpFormatter,
         epilog = """
 Examples:
-  python main.py                               File mode, default audio
+  python main.py                               File mode, default audio (small model)
+  python main.py --model tiny                  File mode, fast tiny model
   python main.py input/audio/test.wav          File mode, custom audio
   python main.py --mode live                   Live mic + API + dashboard
-  python main.py --mode live --no-dashboard    API only
-  python main.py --mode live --mic-device 1    Specific mic device
-  python main.py --skip-phase1 --skip-phase2  Reuse existing output
+  python main.py --mode live --no-dashboard    Live mic + API only
+  python main.py --mode live --mic-device 1    Use mic device index 1
+  python main.py --skip-phase1 --skip-phase2   Reuse existing output
         """,
     )
     parser.add_argument("audio",          nargs="?",  default=DEFAULT_AUDIO)
     parser.add_argument("--mode",         choices=["file","live"], default="file")
-    parser.add_argument("--model",        choices=["tiny","base","small","medium"], default="tiny")
+    parser.add_argument("--model",        choices=["tiny","base","small","medium"],
+                        default="small")   # CHANGED: was "tiny"
     parser.add_argument("--no-dashboard", action="store_true")
-    parser.add_argument("--mic-device",   type=int,  default=None)
+    parser.add_argument("--mic-device",   type=int,   default=None)
     parser.add_argument("--skip-phase1",  action="store_true")
     parser.add_argument("--skip-phase2",  action="store_true")
     parser.add_argument("--skip-phase3",  action="store_true")
+    parser.add_argument("--dashboard",    action="store_true",
+                        help="Start the Streamlit dashboard after file mode completes")
     args = parser.parse_args()
 
     if args.mode == "live":
@@ -345,6 +388,7 @@ Examples:
                 "phase2": args.skip_phase2,
                 "phase3": args.skip_phase3,
             },
+            dashboard = args.dashboard,
         )
 
 

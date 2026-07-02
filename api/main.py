@@ -1,21 +1,28 @@
 """
 api/main.py
 ============
-VoiceGuard FastAPI — Stage 4 + 5
+VoiceGuard FastAPI — Stage 4 + 5 + 6
 
-Stage 4: DB initialized at startup, worker writes chunks to SQLite
-Stage 5: AlertDispatcher initialized at startup, wired into worker
+Stage 6 addition:
+  - Worker created with enable_heavy=True (wav2vec2 on YELLOW/RED chunks)
+  - model_size="small" (was "tiny") for better Hinglish accuracy
+  - health endpoint now reports wav2vec2 load status
 
 Run:
     uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 """
 
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from pipeline.core.config       import validate_config
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pipeline.core.config       import validate_config, WHISPER_MODEL_SIZE
 from pipeline.core.queue_manager import AudioQueue
 from pipeline.core.worker       import PipelineWorker, ResultsStore
 from pipeline.phase3_analysis.emergency_detector import start_background_loading
@@ -27,62 +34,64 @@ from api.routes.health  import router as health_router
 from api.routes.chunks  import router as chunks_router
 from api.routes.alerts  import router as alerts_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+os.makedirs("output", exist_ok=True)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+for handler in list(root_logger.handlers):
+    root_logger.removeHandler(handler)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(formatter)
+root_logger.addHandler(stream_handler)
+
+debug_handler = logging.FileHandler("output/debug.log", mode="a", encoding="utf-8")
+debug_handler.setLevel(logging.DEBUG)
+debug_handler.setFormatter(formatter)
+root_logger.addHandler(debug_handler)
+
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Startup sequence:
-      1. validate_config()          — fail loudly on misconfiguration
-      2. init_db()                  — create SQLite tables if not exist (WAL mode)
-      3. start_background_loading() — BART starts loading in daemon thread
-      4. AlertDispatcher()          — alert coordinator with DB access
-      5. ResultsStore()             — in-memory fast read cache
-      6. AudioQueue()               — bounded chunk queue
-      7. PipelineWorker.start()     — worker thread begins
-    """
-    logger.info("VoiceGuard API starting up...")
+    logger.info("VoiceGuard API starting...")
 
-    # 1. Config
     validate_config()
     logger.info("Config validated ✅")
 
-    # 2. Database
     init_db()
+    logger.info("Database initialized ✅")
 
-    # 3. BART background load
     start_background_loading()
     logger.info("BART background loading started ✅")
 
-    # 4. Alert dispatcher (has DB access for audit log)
     dispatcher             = AlertDispatcher(db_factory=SessionLocal)
     app.state.dispatcher   = dispatcher
 
-    # 5. Results store
     results_store          = ResultsStore(maxlen=500)
     app.state.results      = results_store
 
-    # 6. Queue
     audio_queue            = AudioQueue()
     app.state.queue        = audio_queue
 
-    # 7. Worker
     worker = PipelineWorker(
         audio_queue   = audio_queue,
         results_store = results_store,
         dispatcher    = dispatcher,
         db_factory    = SessionLocal,
+        model_size    = WHISPER_MODEL_SIZE,   # from config (default "small")
+        enable_heavy  = True,                  # Stage 6: wav2vec2 on YELLOW/RED
     )
     worker.start()
     app.state.worker = worker
 
     logger.info("VoiceGuard API ready — http://localhost:8000/docs ✅")
+    logger.info(f"Whisper model: {WHISPER_MODEL_SIZE} | Heavy pipeline: enabled")
 
     yield
 
-    # Shutdown
     logger.info("Shutting down...")
     worker.stop()
     worker.join(timeout=10)
@@ -92,7 +101,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title       = "VoiceGuard API",
     description = "Real-Time Voice Emergency Detection System",
-    version     = "4.0.0",
+    version     = "6.0.0",
     lifespan    = lifespan,
 )
 
@@ -113,7 +122,7 @@ app.include_router(health_router, prefix="/health", tags=["System"])
 def root():
     return {
         "system":  "VoiceGuard",
-        "version": "4.0.0",
-        "stage":   "Stage 4+5 — SQLite + Alert Dispatcher",
+        "version": "6.0.0",
+        "stage":   "Stage 6 — Heavy Pipeline (wav2vec2) Active",
         "docs":    "/docs",
     }

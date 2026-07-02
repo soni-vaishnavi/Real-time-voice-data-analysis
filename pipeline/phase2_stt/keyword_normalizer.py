@@ -70,6 +70,8 @@ EMERGENCY_KEYWORDS = {
     "bleeding":       ("MEDICAL", 0.28),
     "dard":           ("MEDICAL", 0.15),
     "pain":           ("MEDICAL", 0.12),
+    "injured":        ("MEDICAL", 0.30),
+    "injury":         ("MEDICAL", 0.30),
     "chest pain":     ("MEDICAL", 0.28),
     "seene mein dard":("MEDICAL", 0.30),
     "stroke":         ("MEDICAL", 0.30),
@@ -236,14 +238,12 @@ def get_keyword_summary(keywords_found: List[Dict]) -> Dict:
     categories = [k["category"] for k in keywords_found]
     unique_categories = list(set(categories))
 
-    # Count category frequency
-    category_counts = {}
-    for cat in categories:
-        category_counts[cat] = category_counts.get(cat, 0) + 1
+    # Top category should reflect the strongest emergency signal, not just the most frequent word.
+    category_boosts = {}
+    for k in keywords_found:
+        category_boosts[k["category"]] = category_boosts.get(k["category"], 0.0) + k["boost"]
 
-    top_category = max(category_counts, key=category_counts.get)
-
-    # Sum boosts but cap at 0.40 to prevent keyword flooding
+    top_category = max(category_boosts, key=category_boosts.get)
     total_boost = min(sum(k["boost"] for k in keywords_found), 0.40)
 
     return {

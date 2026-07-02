@@ -446,7 +446,7 @@ def generate_session_report(
             score = round(s.get("final_score",0)*100)
             cat   = CAT_LABEL.get(s.get("emergency_category","?"),"?")[:12]
             emo   = s.get("dominant_emotion","?")
-            iid   = s.get("incident_id","—")
+            iid   = s.get("incident_id") or "—"
             txt   = (c.get("text") or "—")[:50]
             ts    = round(c.get("chunk_start",0),1)
             inc_rows.append([

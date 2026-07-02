@@ -26,6 +26,7 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from pipeline.phase5_alerts.dashboard_data import load_chunks, data_source_label
 from pipeline.phase5_alerts.sms_alert   import send_emergency_sms,  TWILIO_ENABLED
 from pipeline.phase5_alerts.email_alert import send_emergency_email, EMAIL_ENABLED
 from pipeline.phase5_alerts.sound_alert import trigger_for_zone, stop_alarm, is_alarm_active
@@ -217,11 +218,8 @@ def label(text, color="#6b7280"):
 
 # ── DATA ───────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3)
-def load_decisions() -> List[Dict]:
-    if not os.path.exists(DECISIONS_PATH):
-        return []
-    with open(DECISIONS_PATH, encoding="utf-8") as f:
-        return json.load(f)
+def get_chunks() -> List[Dict]:
+    return load_chunks()
 
 def get_chunk_audio_path(chunk_id: str) -> Optional[str]:
     """Find WAV file for a chunk in output/chunks/."""
@@ -932,7 +930,7 @@ def render_controls():
 #  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
-    chunks = load_decisions()
+    chunks = get_chunks()
 
     # Unresolved RED incidents
     red_unresolved = [
@@ -949,7 +947,11 @@ def main():
     st.markdown("<div style='padding:20px 28px'>", unsafe_allow_html=True)
 
     if not chunks:
-        st.error(f"No data found at `{DECISIONS_PATH}`. Run `python test_phase4.py` first.")
+        st.error(
+            f"No data found for dashboard source: {data_source_label()}. "
+            "If you are in file mode, run `python test_phase4.py` first. "
+            "If you are in live mode, make sure `python main.py --mode live` is running."
+        )
         st.stop()
 
     # ── STATS ROW ────────────────────────────────────────────────────────
